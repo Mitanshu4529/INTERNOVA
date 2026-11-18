@@ -1,6 +1,40 @@
 import React, { useState, useEffect } from 'react';
 import { motion } from 'motion/react';
 import { extractTextFromFile, parseResumeWithAI } from '../utils/resumeParser';
+import { recommendationService } from '../services/recommendationService';
+import { sameCity } from '../utils/locations';
+
+// Skills to show and search for a listing: its stated skills, or, when it
+// states none, the likely skills inferred from its title.
+const listingSkills = (internship: any): string[] => {
+  const stated = Array.isArray(internship?.skills) ? internship.skills : [];
+  if (stated.length > 0) return stated;
+  const inferred = internship?.inferredSkills;
+  return inferred ? [...(inferred.explicit || []), ...(inferred.typical || [])].slice(0, 6) : [];
+};
+// Lets Enter or Space activate an element that is clickable but is not a
+// native button (filter chips, list rows), so it works from the keyboard.
+const activateOnKey = (e: React.KeyboardEvent) => {
+  if (e.key === 'Enter' || e.key === ' ') {
+    e.preventDefault();
+    e.currentTarget.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+  }
+};
+// Work modes a student can prefer. Select items cannot have an empty value,
+// so "no preference" has its own marker and is stored as ''.
+const WORK_MODES = ['Remote', 'On-site', 'Hybrid'];
+const NO_PREFERENCE = 'none';
+
+// Site name of a listing's original posting, e.g. "internshala.com".
+const sourceHost = (url: string): string => {
+  try {
+    return new URL(url).hostname.replace(/^www\./, '');
+  } catch {
+    return 'the source site';
+  }
+};
+import type { Internship, UserProfile, RecommendationResult } from '../types/recommendation';
+import { normalizeSkills } from '../utils/dataNormalizer';
 import { Button } from './ui/button';
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from './ui/card';
 import { Badge } from './ui/badge';
@@ -16,12 +50,12 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from 
 import { Checkbox } from './ui/checkbox';
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from './ui/collapsible';
 import { Slider } from './ui/slider';
-import { 
-  Target, 
-  LogOut, 
-  User, 
-  Briefcase, 
-  MapPin, 
+import {
+  Target,
+  LogOut,
+  User,
+  Briefcase,
+  MapPin,
   Calendar,
   CalendarDays,
   Star,
@@ -46,8 +80,11 @@ import {
   Clock,
   Bell,
   MessageSquare,
-  Loader2
+  Loader2,
+  Info
 } from 'lucide-react';
+import { notify } from '../utils/notify';
+import { isSupportedPhoto, resizePhoto, PHOTO_MAX_BYTES } from '../utils/image';
 
 interface UserDashboardProps {
   user: any;
@@ -99,6 +136,9 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
     cgpa: '',
     bio: '',
     location: '',
+    // Optional preferences used in matching ('' = no preference).
+    preferredWorkMode: '',
+    minStipend: '',
     skills: [] as string[],
     experience: [] as any[],
     projects: [] as any[],
@@ -106,9 +146,13 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
     resume: null as File | null,
     ...user.profile
   });
-  
+
   const [newSkill, setNewSkill] = useState('');
   const [searchQuery, setSearchQuery] = useState('');
+  // The feed can hold thousands of listings; only this many cards are drawn at
+  // a time (best matches first), with a button to show more.
+  const FEED_PAGE_SIZE = 50;
+  const [visibleCount, setVisibleCount] = useState(FEED_PAGE_SIZE);
   const [availableInternships, setAvailableInternships] = useState<any[]>([]);
   const [savedInternships, setSavedInternships] = useState<Set<string>>(new Set());
   const [appliedInternships, setAppliedInternships] = useState<Set<string>>(new Set());
@@ -117,11 +161,15 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
   const [tempBio, setTempBio] = useState('');
   const [isLoading, setIsLoading] = useState(true);
   const [isParsingResume, setIsParsingResume] = useState(false);
-  
+
   // Messages/Activity
   const [messages, setMessages] = useState<any[]>([]);
   const [unreadCount, setUnreadCount] = useState(0);
-  
+
+  // Recommendation engine results
+  const [recommendationResults, setRecommendationResults] = useState<Map<string, RecommendationResult>>(new Map());
+  const [expandedExplanations, setExpandedExplanations] = useState<Set<string>>(new Set());
+
   // Filters
   const [filters, setFilters] = useState({
     type: [] as string[],
@@ -135,57 +183,56 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
   const [collegeSearch, setCollegeSearch] = useState('');
   const [showCollegeDropdown, setShowCollegeDropdown] = useState(false);
 
-  // Load profile from localStorage on mount
+  // Load the saved profile for this account. It arrives with the signed-in user
+  // (from the database for real accounts, from the demo store for the demo).
   useEffect(() => {
-    const loadProfile = () => {
-      try {
-        // Try to get updated profile from localStorage
-        const localUsers = localStorage.getItem('local_users');
-        if (localUsers) {
-          const users = JSON.parse(localUsers);
-          const userData = users[user.email.toLowerCase().trim()];
-          if (userData && userData.user && userData.user.profile) {
-            const loadedProfile = {
-              university: '',
-              course: '',
-              year: '',
-              cgpa: '',
-              bio: '',
-              location: '',
-              skills: [] as string[],
-              experience: [] as any[],
-              projects: [] as any[],
-              photo: null as string | null,
-              resume: null as File | null,
-              ...userData.user.profile
-            };
-            setProfile(loadedProfile);
-          }
-        }
-      } catch (error) {
-        console.warn('Error loading profile from localStorage:', error);
-      }
-    };
-    
-    loadProfile();
-  }, [user.email, user.id]);
+    if (!user.profile || typeof user.profile !== 'object') return;
+    setProfile((prev: any) => ({
+      ...prev,
+      ...user.profile,
+      skills: Array.isArray(user.profile.skills) ? user.profile.skills : prev.skills,
+      experience: Array.isArray(user.profile.experience) ? user.profile.experience : prev.experience,
+      projects: Array.isArray(user.profile.projects) ? user.profile.projects : prev.projects,
+    }));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user.id]);
 
   // Load ALL data including internships on mount and when user changes
   useEffect(() => {
+    const handleInternshipCreated = async (e: CustomEvent) => {
+      console.log('Received internship:created event:', e.detail);
+      // Re-fetch internships to get the new one
+      const updatedInternships = await dataStore.getInternships();
+      setAvailableInternships(updatedInternships);
+    };
+
+    const handleApplicationStatusChanged = async () => {
+      console.log('Received application:status-changed event');
+      // Re-fetch applications
+      const applicationsData = await dataStore.getApplicationsByStudent(user.id);
+      setApplications(applicationsData);
+      setAppliedInternships(new Set(applicationsData.map((app: any) => app.internshipId)));
+    };
+
+    // Must match the names dispatched by dataStore (they were 'internship:created' /
+    // 'application:status-changed' here, so these listeners never fired).
+    window.addEventListener('internova:internship-created', handleInternshipCreated as unknown as EventListener);
+    window.addEventListener('internova:application-status-changed', handleApplicationStatusChanged as unknown as EventListener);
+
     const loadAllData = async () => {
       try {
         setIsLoading(true);
-        
+
         // 1. Load saved and applied internships first
         const [saved, applicationsData] = await Promise.all([
           dataStore.getSavedInternships(user.id),
           dataStore.getApplicationsByStudent(user.id)
         ]);
-        
+
         setSavedInternships(new Set(saved));
         setAppliedInternships(new Set(applicationsData.map((app: any) => app.internshipId)));
         setApplications(applicationsData);
-        
+
         // 2. Load messages
         const [msgs, unread] = await Promise.all([
           dataStore.getMessagesForUser(user.email),
@@ -193,7 +240,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
         ]);
         setMessages(msgs);
         setUnreadCount(unread);
-        
+
         // 3. Load internships (this is critical - must load after saved/applied state)
         // Always load internships - use recommendations if skills available, otherwise all internships
         let internships: any[] = [];
@@ -213,7 +260,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
             internships = [];
           }
         }
-        
+
         // Ensure we have internships - if still empty, try one more time
         if (!internships || internships.length === 0) {
           console.warn('No internships loaded, trying direct API call...');
@@ -224,50 +271,98 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
             internships = [];
           }
         }
-        
+
         console.log('Loaded internships:', internships.length);
-        
+
         const allApplications = await dataStore.getAllApplications();
-        
-        // Add application stats and match scores
+
+        // Build user profile for recommendation engine
+        const userProfile: UserProfile = {
+          id: user.id,
+          name: user.name,
+          email: user.email,
+          skills: profile.skills || [],
+          location: profile.location || undefined,
+          preferredLocation: profile.location || undefined,
+          expectedStipend: Number(profile.minStipend) > 0 ? String(profile.minStipend) : undefined,
+          preferredWorkMode: WORK_MODES.includes(profile.preferredWorkMode) ? [profile.preferredWorkMode] : undefined,
+          experience: 0,
+          cgpa: profile.cgpa ? parseFloat(profile.cgpa) : undefined,
+          profileCompletion: profileCompletion(),
+          university: profile.university,
+          course: profile.course,
+          year: profile.year
+        };
+
+        // Run multi-factor recommendation engine
+        let results: RecommendationResult[] = [];
+        try {
+          const typedInternships: Internship[] = internships.map((i: any) => ({
+            id: i.id || '',
+            title: i.title || '',
+            company: i.company || '',
+            location: i.location || '',
+            stipend: i.stipend || '',
+            duration: i.duration || '',
+            description: i.description || '',
+            skills: normalizeSkills(Array.isArray(i.skills) ? i.skills.join(', ') : (i.skills || '')),
+            inferredSkills: i.inferredSkills,
+            type: (i.type || 'On-site') as any,
+            status: (i.status || 'Active') as any,
+            source: i.source || '',
+            companyId: i.companyId || i.company_id || '',
+            requirements: i.requirements,
+            cgpaRequirement: i.cgpaRequirement || i.cgpa_requirement,
+            experienceLevel: i.experienceLevel || i.experience_level
+          }));
+
+          results = await recommendationService.getRecommendations(userProfile, typedInternships, 0);
+        } catch (recError) {
+          console.warn('Recommendation engine failed, falling back to basic scoring:', recError);
+          // Fallback: basic scoring
+          results = internships.map((internship: any, index: number) => ({
+            internship: { ...internship, id: internship.id || '', skills: Array.isArray(internship.skills) ? internship.skills : [] },
+            score: {
+              totalScore: internship.matchScore || 50,
+              factors: [],
+              internshipId: internship.id || '',
+              matchedSkills: [],
+              missingSkills: [],
+              explanation: 'Recommendation engine unavailable'
+            },
+            rank: index + 1
+          }));
+        }
+
+        // Build a lookup map for quick access
+        const resultMap = new Map<string, RecommendationResult>();
+        results.forEach(r => resultMap.set(r.internship.id, r));
+
+        // Enrich internships with recommendation scores + applicant counts
         const enrichedInternships = internships.map((internship: any) => {
           const applicantCount = allApplications.filter((app: any) => app.internshipId === internship.id).length;
-          
-          let matchScore = internship.matchScore || 50;
-          if (!internship.matchScore && profile && profile.skills && profile.skills.length > 0) {
-             const userSkills = profile.skills.map((skill: string) => skill.toLowerCase().trim());
-             const internshipSkills = (internship.skills || []).map((skill: string) => skill.toLowerCase().trim());
-             const matchingSkills = userSkills.filter((userSkill: string) => 
-               internshipSkills.some((internshipSkill: string) => 
-                 userSkill.includes(internshipSkill) || 
-                 internshipSkill.includes(userSkill) ||
-                 userSkill === internshipSkill
-               )
-             );
-             const skillMatchPercentage = internshipSkills.length > 0 ? 
-               (matchingSkills.length / internshipSkills.length) * 100 : 0;
-             matchScore = Math.min(50 + Math.round(skillMatchPercentage * 0.45), 95);
-          }
+          const result = resultMap.get(internship.id);
+          const matchScore = result?.score.totalScore ?? internship.matchScore ?? 50;
 
           return {
             ...internship,
-            matchScore: matchScore,
-            acceptanceRate: 10 + Math.floor(Math.random() * 30),
+            matchScore,
             applicants: applicantCount
           };
         });
-        
-        console.log('Enriched internships:', enrichedInternships.length);
+
+        console.log('Enriched internships:', enrichedInternships.length, '(via recommendation engine)');
         setAvailableInternships(enrichedInternships);
+        setRecommendationResults(resultMap);
         setIsLoading(false);
       } catch (error) {
         console.error('Error loading all data:', error);
         setIsLoading(false);
       }
     };
-    
+
     loadAllData();
-    
+
     // Set up refresh interval
     const interval = setInterval(async () => {
       try {
@@ -287,8 +382,14 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
       }
     }, 10000);
 
-    return () => clearInterval(interval);
-  }, [user.id, user.email, dataStore, profile.skills?.length || 0]); // Re-run when user or skills change
+    return () => {
+      clearInterval(interval);
+      window.removeEventListener('internova:internship-created', handleInternshipCreated as unknown as EventListener);
+      window.removeEventListener('internova:application-status-changed', handleApplicationStatusChanged as unknown as EventListener);
+    };
+  // Re-run when anything the match depends on changes. (This used to watch only
+  // the number of skills, so changing the location did not re-rank the feed.)
+  }, [user.id, user.email, dataStore, (profile.skills || []).join('|'), profile.location, profile.preferredWorkMode, profile.minStipend]);
 
   useEffect(() => {
     if (user.isNewUser && showProfilePrompt) {
@@ -321,7 +422,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
     try {
       const isSaved = savedInternships.has(id);
       console.log('Is saved?', isSaved);
-      
+
       // Update UI immediately for better UX
       if (isSaved) {
         setSavedInternships(prev => {
@@ -339,7 +440,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
         });
         await dataStore.saveInternship(user.id, id);
       }
-      
+
       // Refresh from dataStore to ensure consistency
       const updatedSaved = await dataStore.getSavedInternships(user.id);
       console.log('Updated saved internships:', updatedSaved);
@@ -349,7 +450,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
       // Revert UI on error
       const updatedSaved = await dataStore.getSavedInternships(user.id);
       setSavedInternships(new Set(updatedSaved));
-      alert('Failed to save internship. Please try again.');
+      notify('Failed to save internship. Please try again.');
     }
   };
 
@@ -358,7 +459,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
     try {
       // Check if already applied
       if (appliedInternships.has(id)) {
-        alert('You have already applied to this internship.');
+        notify('You have already applied to this internship.');
         return;
       }
 
@@ -372,45 +473,45 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
 
       // 1. Sanitize Profile: Remove raw File objects before sending to DB
       const profileForDB = { ...profile };
-      
+
       // If resume is a File object (from recent upload), replace with metadata
       if (profile.resume instanceof File) {
-        profileForDB.resume = { 
-          name: profile.resume.name, 
-          date: new Date().toISOString() 
+        profileForDB.resume = {
+          name: profile.resume.name,
+          date: new Date().toISOString()
         };
       }
 
       // 2. Update profile in dataStore first
       await dataStore.updateUserProfile(user.id, profileForDB);
-      
+
       // 3. Apply to internship using the Sanitized Profile
       await dataStore.applyToInternship(
-        user.id, 
-        id, 
+        user.id,
+        id,
         profileForDB,
         { name: user.name, email: user.email }
       );
-      
+
       // 4. Refresh all data from dataStore to ensure consistency
       const [updatedSaved, updatedApplications] = await Promise.all([
         dataStore.getSavedInternships(user.id),
         dataStore.getApplicationsByStudent(user.id)
       ]);
-      
+
       // Update local UI state with fresh data
       setSavedInternships(new Set(updatedSaved));
       setAppliedInternships(new Set(updatedApplications.map((app: any) => app.internshipId)));
       setApplications(updatedApplications);
-      
-      alert('Application submitted successfully!');
+
+      notify('Application submitted successfully!');
     } catch (error) {
       console.error('Error applying to internship:', error);
       // Revert UI on error
       const updatedApplications = await dataStore.getApplicationsByStudent(user.id);
       setAppliedInternships(new Set(updatedApplications.map((app: any) => app.internshipId)));
       setApplications(updatedApplications);
-      alert('Failed to submit application. Please try again.');
+      notify('Failed to submit application. Please try again.');
     }
   };
 
@@ -418,11 +519,12 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
   const updateProfile = async (updates: any) => {
     const newProfile = { ...profile, ...updates };
     setProfile(newProfile);
-    
+
     try {
       await dataStore.updateUserProfile(user.id, newProfile);
     } catch (error) {
       console.error('Error updating profile:', error);
+      notify('Could not save your profile. Please try again.');
     }
   };
 
@@ -432,14 +534,24 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
     setTempBio('');
   };
 
-  const handlePhotoUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+  const handlePhotoUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    if (file) {
-      const reader = new FileReader();
-      reader.onload = (e) => {
-        updateProfile({ photo: e.target?.result as string });
-      };
-      reader.readAsDataURL(file);
+    event.target.value = ''; // so choosing the same file again is noticed
+    if (!file) return;
+    if (!isSupportedPhoto(file)) {
+      notify('Please choose a JPEG, PNG, WebP or GIF image for your photo.');
+      return;
+    }
+    if (file.size > PHOTO_MAX_BYTES) {
+      notify('That image is larger than 10 MB. Please choose a smaller one.');
+      return;
+    }
+    try {
+      // Scaled down in the browser: the photo is stored inside the profile.
+      updateProfile({ photo: await resizePhoto(file) });
+    } catch (error) {
+      console.error('Photo upload failed:', error);
+      notify('Could not read that image. Please try a different file.');
     }
   };
 
@@ -450,20 +562,32 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
 
   const handleResumeUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
-    
+
     if (file) {
+      // Only text-like documents up to 5 MB are read.
+      const isSupported = /\.(pdf|txt|md)$/i.test(file.name) || file.type === 'application/pdf' || file.type.startsWith('text/');
+      if (!isSupported) {
+        notify('Please upload your resume as a PDF or plain-text file.');
+        event.target.value = '';
+        return;
+      }
+      if (file.size > 5 * 1024 * 1024) {
+        notify('That file is larger than 5 MB. Please upload a smaller resume.');
+        event.target.value = '';
+        return;
+      }
       setIsParsingResume(true);
       try {
         // 1. Extract raw text from any file type
         const text = await extractTextFromFile(file);
-        
-        // 2. Get exactly 5 skills from AI/keyword matching
+
+        // 2. Skills found in the resume (may be none)
         const extractedSkills = await parseResumeWithAI(text);
-        
+
         // 3. Merge Skills (add new ones, keep existing)
         const currentSkills = profile.skills || [];
         const uniqueSkills = Array.from(new Set([...currentSkills, ...extractedSkills]));
-        
+
         // 4. Prepare Clean Profile for Database (No File Object!)
         const profileForDB = {
           ...profile,
@@ -473,53 +597,55 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
 
         // 5. Update Database
         await updateProfile(profileForDB);
-        
+
         // 6. Update Local State (Keep the file object here for UI if needed)
-        setProfile({ ...profileForDB, resume: file }); 
-        
-        alert(`Success! Extracted 5 skills: ${extractedSkills.join(', ')}. Profile updated.`);
-        
+        setProfile({ ...profileForDB, resume: file });
+
+        notify(extractedSkills.length > 0
+          ? `Found ${extractedSkills.length} skill${extractedSkills.length === 1 ? '' : 's'} in your resume: ${extractedSkills.join(', ')}. Profile updated.`
+          : 'Resume uploaded, but no known skills were found in it. You can add your skills manually.');
+
       } catch (error) {
         console.error("File parsing failed:", error);
-        alert("Could not process file. Please try again.");
+        notify("Could not process file. Please try again.");
       } finally {
         setIsParsingResume(false);
       }
     } else {
-      alert('Please select a file');
+      notify('Please select a file');
     }
   };
   const handleAIBioCompletion = () => {
     // Mock AI bio completion based on existing profile data
     let aiBio = "Passionate ";
-    
+
     if (profile.course) {
       aiBio += `${profile.course.toLowerCase()} `;
     }
-    
+
     aiBio += "student with a strong foundation in ";
-    
+
     if (profile.skills && profile.skills.length > 0) {
       const mainSkills = profile.skills.slice(0, 3).join(', ');
       aiBio += `${mainSkills}. `;
     } else {
       aiBio += "programming and technology. ";
     }
-    
+
     if (profile.university && profile.university.trim()) {
       aiBio += `Currently studying at ${profile.university}. `;
     }
-    
+
     aiBio += "Eager to apply my skills in a challenging internship environment and contribute to innovative projects while learning from industry professionals. ";
-    
+
     if (profile.location && profile.location.trim()) {
       aiBio += `Based in ${profile.location} and `;
     }
-    
+
     aiBio += "looking forward to hands-on experience that bridges academic knowledge with real-world applications.";
-    
+
     updateProfile({ bio: aiBio });
-    alert('Bio completed with AI assistance!');
+    notify('Bio completed with AI assistance!');
   };
 
   // Function to refresh messages
@@ -544,69 +670,71 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
     }
   };
 
-  const calculateAcceptanceRate = (internship: any) => {
-    let baseRate = internship.acceptanceRate || 50;
-    
-    // Adjust based on user profile completion
-    const completion = profileCompletion();
-    if (completion < 50) baseRate *= 0.6;
-    else if (completion > 80) baseRate *= 1.3;
-    
-    // Adjust based on skill match
-    const userSkills = (profile.skills || []).map((s:string) => s.toLowerCase());
-    const requiredSkills = (internship.skills || []).map((s: string) => s.toLowerCase());
-    const skillMatch = requiredSkills.length > 0 ? 
-      requiredSkills.filter((skill: string) => 
-        userSkills.some((userSkill:string) => userSkill.includes(skill) || skill.includes(userSkill))
-      ).length / requiredSkills.length : 0;
-    
-    baseRate *= (0.7 + skillMatch * 0.6);
-    
-    // Adjust based on CGPA if provided
-    if (profile.cgpa && internship.requirements && internship.requirements.cgpa) {
-      const userCgpa = parseFloat(profile.cgpa);
-      const reqCgpa = internship.requirements.cgpa;
-      if (userCgpa >= reqCgpa) baseRate *= 1.2;
-      else if (userCgpa < reqCgpa - 1) baseRate *= 0.7;
-    }
-    
-    return Math.min(Math.round(baseRate), 95);
+  // Get recommendation result for an internship (score breakdown, explanation)
+  const getRecommendationResult = (internshipId: string): RecommendationResult | undefined => {
+    return recommendationResults.get(internshipId);
+  };
+
+  const toggleExplanation = (internshipId: string) => {
+    setExpandedExplanations(prev => {
+      const newSet = new Set(prev);
+      if (newSet.has(internshipId)) newSet.delete(internshipId);
+      else newSet.add(internshipId);
+      return newSet;
+    });
   };
 
   const filteredInternships = availableInternships.filter(internship => {
     // Text search
     const matchesSearch = (internship.title || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
       (internship.company || '').toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (internship.skills || []).some((skill:string) => skill.toLowerCase().includes(searchQuery.toLowerCase())) ||
+      listingSkills(internship).some((skill:string) => skill.toLowerCase().includes(searchQuery.toLowerCase())) ||
       (internship.location || '').toLowerCase().includes(searchQuery.toLowerCase());
 
     // Type filter
     const matchesType = filters.type.length === 0 || filters.type.includes(internship.type);
-    
-    // Location filter
-    const matchesLocation = filters.location.length === 0 || filters.location.includes(internship.location);
-    
-    // Stipend filter
+
+    // Location filter: case-insensitive containment, so "Bangalore" also matches
+    // "Bangalore, Karnataka, India".
+    const internshipLocation = (internship.location || '').toLowerCase();
+    const matchesLocation = filters.location.length === 0 ||
+      filters.location.some(loc => internshipLocation.includes(loc.toLowerCase()) || sameCity(loc, internship.location));
+
+    // Stipend filter: only applied once the user has moved the slider. At its
+    // default position it used to hide every listing above the slider maximum.
     const stipendAmount = internship.stipendAmount || 0;
-    const matchesStipend = stipendAmount >= filters.stipendRange[0] && 
-                          stipendAmount <= filters.stipendRange[1];
-    
-    // Duration filter
-    const matchesDuration = filters.duration.length === 0 || 
-                           filters.duration.some(dur => (internship.duration || '').includes(dur));
+    const stipendFilterActive = filters.stipendRange[0] > 0 || filters.stipendRange[1] < 25000;
+    const matchesStipend = !stipendFilterActive ||
+      (stipendAmount >= filters.stipendRange[0] &&
+        (filters.stipendRange[1] >= 25000 || stipendAmount <= filters.stipendRange[1]));
+
+    // Duration filter (case-insensitive: "3 months" vs "3 Months")
+    const internshipDuration = (internship.duration || '').toLowerCase();
+    const matchesDuration = filters.duration.length === 0 ||
+                           filters.duration.some(dur => internshipDuration.includes(dur.toLowerCase()));
 
     return matchesSearch && matchesType && matchesLocation && matchesStipend && matchesDuration;
   }).sort((a, b) => {
-    // Sort by match score in descending order (highest match first)
-    return (b.matchScore || 0) - (a.matchScore || 0);
+    // Recommendations first: best match on top, newest first among equal scores.
+    // (Sorting by date first meant the match score almost never affected the order.)
+    const scoreDiff = (b.matchScore || 0) - (a.matchScore || 0);
+    if (scoreDiff !== 0) return scoreDiff;
+    const dateA = new Date(a.createdAt || a.posted || 0).getTime();
+    const dateB = new Date(b.createdAt || b.posted || 0).getTime();
+    return (dateB || 0) - (dateA || 0);
   });
+
+  // A new search or filter starts again from the first page of results.
+  useEffect(() => {
+    setVisibleCount(FEED_PAGE_SIZE);
+  }, [searchQuery, filters]);
 
   const profileCompletion = () => {
     const fields = [
-      profile.university || '', 
-      profile.course || '', 
-      profile.year || '', 
-      profile.bio || '', 
+      profile.university || '',
+      profile.course || '',
+      profile.year || '',
+      profile.bio || '',
       profile.location || ''
     ];
     const completed = fields.filter(field => field.trim() !== '').length;
@@ -636,14 +764,14 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
               <ArrowLeft className="h-4 w-4 mr-2" />
               Back
             </Button>
-            <div className="flex items-center space-x-2 cursor-pointer" onClick={handleLogoClick}>
-              <div className="h-8 w-8 bg-primary rounded-lg flex items-center justify-center">
+            <button type="button" className="flex items-center space-x-2 cursor-pointer" onClick={handleLogoClick} aria-label="Internova home">
+              <span className="h-8 w-8 bg-primary rounded-lg flex items-center justify-center" aria-hidden="true">
                 <Target className="h-5 w-5 text-primary-foreground" />
-              </div>
+              </span>
               <span className="text-xl font-semibold">Internova</span>
-            </div>
+            </button>
           </div>
-          
+
           <div className="flex items-center space-x-4">
             <Avatar>
               {profile.photo ? (
@@ -658,8 +786,8 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
               <p className="font-medium">{user.name}</p>
               <p className="text-sm text-muted-foreground">{user.email}</p>
             </div>
-            <Button variant="ghost" size="sm" onClick={onLogout}>
-              <LogOut className="h-4 w-4" />
+            <Button variant="ghost" size="sm" onClick={onLogout} aria-label="Log out" title="Log out">
+              <LogOut className="h-4 w-4" aria-hidden="true" />
             </Button>
           </div>
         </div>
@@ -667,7 +795,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
 
       {/* Profile Completion Prompt */}
       {showProfilePrompt && (
-        <motion.div 
+        <motion.div
           initial={{ opacity: 0, y: -50 }}
           animate={{ opacity: 1, y: 0 }}
           exit={{ opacity: 0, y: -50 }}
@@ -677,8 +805,8 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
             <AlertCircle className="h-4 w-4" />
             <AlertDescription>
               Welcome! Complete your profile first to get personalized internship recommendations with better acceptance rates.
-              <Button 
-                variant="link" 
+              <Button
+                variant="link"
                 className="p-0 h-auto ml-2"
                 onClick={() => setActiveTab('profile')}
               >
@@ -690,15 +818,16 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
       )}
 
       {/* Main Content */}
-      <div className="container py-6">
+      <div className="container py-6" role="main">
+        <h1 className="sr-only">Student dashboard</h1>
         <Tabs value={activeTab} onValueChange={setActiveTab}>
           <div className="flex justify-center mb-6">
             <div className="inline-flex bg-muted p-1 rounded-lg">
               <button
                 onClick={() => setActiveTab('feed')}
                 className={`px-4 py-2 text-sm font-medium rounded-md transition-all ${
-                  activeTab === 'feed' 
-                    ? 'bg-background shadow-sm text-foreground' 
+                  activeTab === 'feed'
+                    ? 'bg-background shadow-sm text-foreground'
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
@@ -707,8 +836,8 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
               <button
                 onClick={() => setActiveTab('profile')}
                 className={`px-4 py-2 text-sm font-medium rounded-md transition-all ${
-                  activeTab === 'profile' 
-                    ? 'bg-background shadow-sm text-foreground' 
+                  activeTab === 'profile'
+                    ? 'bg-background shadow-sm text-foreground'
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
@@ -720,8 +849,8 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                   refreshMessages();
                 }}
                 className={`px-4 py-2 text-sm font-medium rounded-md transition-all relative ${
-                  activeTab === 'applications' 
-                    ? 'bg-background shadow-sm text-foreground' 
+                  activeTab === 'applications'
+                    ? 'bg-background shadow-sm text-foreground'
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
@@ -734,10 +863,10 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
               </button>
             </div>
           </div>
-          
+
           {/* Internship Feed */}
           <TabsContent value="feed" className="space-y-6">
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               className="space-y-4"
@@ -748,13 +877,14 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                   <Search className="absolute left-3 top-3 h-4 w-4 text-muted-foreground" />
                   <Input
                     placeholder="Search internships, companies, or skills..."
+                    aria-label="Search internships, companies, or skills"
                     className="pl-10"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                   />
                 </div>
-                <Button 
-                  variant="outline" 
+                <Button
+                  variant="outline"
                   onClick={() => setShowFilters(!showFilters)}
                   className={showFilters ? 'bg-primary text-primary-foreground' : ''}
                 >
@@ -774,8 +904,12 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                   {filters.type.map((type) => (
                     <Badge key={type} variant="secondary" className="cursor-pointer">
                       {type}
-                      <X 
-                        className="ml-1 h-3 w-3" 
+                      <X
+                        role="button"
+                        tabIndex={0}
+                        aria-label="Remove this filter"
+                        onKeyDown={activateOnKey}
+                        className="ml-1 h-3 w-3"
                         onClick={() => setFilters(prev => ({ ...prev, type: prev.type.filter(t => t !== type) }))}
                       />
                     </Badge>
@@ -783,8 +917,12 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                   {filters.location.map((location) => (
                     <Badge key={location} variant="secondary" className="cursor-pointer">
                       📍 {location}
-                      <X 
-                        className="ml-1 h-3 w-3" 
+                      <X
+                        role="button"
+                        tabIndex={0}
+                        aria-label="Remove this filter"
+                        onKeyDown={activateOnKey}
+                        className="ml-1 h-3 w-3"
                         onClick={() => setFilters(prev => ({ ...prev, location: prev.location.filter(l => l !== location) }))}
                       />
                     </Badge>
@@ -792,8 +930,12 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                   {filters.duration.map((duration) => (
                     <Badge key={duration} variant="secondary" className="cursor-pointer">
                       ⏱️ {duration}
-                      <X 
-                        className="ml-1 h-3 w-3" 
+                      <X
+                        role="button"
+                        tabIndex={0}
+                        aria-label="Remove this filter"
+                        onKeyDown={activateOnKey}
+                        className="ml-1 h-3 w-3"
                         onClick={() => setFilters(prev => ({ ...prev, duration: prev.duration.filter(d => d !== duration) }))}
                       />
                     </Badge>
@@ -801,15 +943,19 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                   {(filters.stipendRange[0] > 0 || filters.stipendRange[1] < 25000) && (
                     <Badge variant="secondary" className="cursor-pointer">
                       💰 ₹{filters.stipendRange[0].toLocaleString()}-₹{filters.stipendRange[1].toLocaleString()}
-                      <X 
-                        className="ml-1 h-3 w-3" 
+                      <X
+                        role="button"
+                        tabIndex={0}
+                        aria-label="Remove this filter"
+                        onKeyDown={activateOnKey}
+                        className="ml-1 h-3 w-3"
                         onClick={() => setFilters(prev => ({ ...prev, stipendRange: [0, 25000] }))}
                       />
                     </Badge>
                   )}
-                  <Button 
-                    variant="ghost" 
-                    size="sm" 
+                  <Button
+                    variant="ghost"
+                    size="sm"
                     onClick={() => setFilters({ type: [], location: [], stipendRange: [0, 25000], duration: [] })}
                     className="h-6 px-2 text-xs"
                   >
@@ -914,7 +1060,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                           <div className="space-y-4">
                             <Slider
                               value={filters.stipendRange}
-                              onValueChange={(value:string) => setFilters((prev:any) => ({ ...prev, stipendRange: value }))}
+                              onValueChange={(value: number[]) => setFilters((prev:any) => ({ ...prev, stipendRange: value }))}
                               max={25000}
                               step={1000}
                               className="w-full"
@@ -926,16 +1072,16 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                           </div>
                         </div>
                       </div>
-                      
+
                       <div className="flex gap-2 mt-6 pt-4 border-t">
-                        <Button 
+                        <Button
                           onClick={() => setFilters({ type: [], location: [], stipendRange: [0, 25000], duration: [] })}
-                          variant="outline" 
+                          variant="outline"
                           className="flex-1"
                         >
                           Clear All Filters
                         </Button>
-                        <Button 
+                        <Button
                           onClick={() => setShowFilters(false)}
                           className="flex-1"
                         >
@@ -947,7 +1093,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                 </CollapsibleContent>
               </Collapsible>
             </motion.div>
-            
+
             {isLoading ? (
               <div className="flex items-center justify-center py-12">
                 <div className="text-center">
@@ -960,40 +1106,41 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                 <div className="text-sm text-muted-foreground mb-4">
                   Found {filteredInternships.length} internships from various platforms
                 </div>
-                
+
                 {filteredInternships.length === 0 ? (
                   <div className="text-center py-12">
                     <p className="text-muted-foreground mb-2">No internships found</p>
                     <p className="text-sm text-muted-foreground">
-                      {availableInternships.length === 0 
-                        ? "Loading internships from database..." 
+                      {availableInternships.length === 0
+                        ? "Loading internships from database..."
                         : "Try adjusting your filters or search query"}
                     </p>
                   </div>
                 ) : (
                   <div className="grid gap-6">
-                    {filteredInternships.map((internship, index) => (
+                    {filteredInternships.slice(0, visibleCount).map((internship, index) => (
                 <motion.div
                   key={internship.id}
                   initial={{ opacity: 0, y: 20 }}
                   animate={{ opacity: 1, y: 0 }}
-                  transition={{ delay: index * 0.1 }}
+                  transition={{ delay: Math.min(index % FEED_PAGE_SIZE, 8) * 0.05 }}
                 >
                   <Card className="hover:shadow-lg transition-all duration-300 border-l-4 border-l-blue-500">
                     <CardHeader>
                       <div className="flex items-start justify-between">
-                        <div>
-                          <CardTitle className="flex items-center gap-2">
-                            {internship.title}
+                        <div className="w-full">
+                          <div className="flex items-center gap-2 mb-1">
+                            <CardTitle>{internship.title}</CardTitle>
                             <Badge variant="secondary" className="text-xs">
                               {internship.matchScore}% match
                             </Badge>
-                            <Badge variant="outline" className="text-xs bg-green-50 text-green-700 border-green-200">
-                              <TrendingUp className="h-3 w-3 mr-1" />
-                              {calculateAcceptanceRate(internship)}% acceptance
-                            </Badge>
-                          </CardTitle>
-                          <CardDescription className="flex items-center gap-4 mt-2">
+                            {internship.type && (
+                              <Badge variant={internship.type === 'Remote' ? 'default' : 'outline'}>
+                                {internship.type}
+                              </Badge>
+                            )}
+                          </div>
+                          <CardDescription className="flex flex-wrap items-center gap-4 mt-2">
                             <span className="flex items-center gap-1">
                               <Briefcase className="h-4 w-4" />
                               {internship.company || 'Unknown Company'}
@@ -1008,36 +1155,117 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                             </span>
                             <span className="flex items-center gap-1">
                               <Globe className="h-4 w-4" />
-                              {internship.source || 'Internova'}
+                              {/^https?:\/\//i.test(internship.source || '') ? (
+                                <a
+                                  href={internship.source}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="underline hover:text-blue-600"
+                                >
+                                  View original listing on {sourceHost(internship.source)}
+                                </a>
+                              ) : (
+                                internship.source || 'Internova'
+                              )}
                             </span>
                           </CardDescription>
                         </div>
-                        <Badge variant={internship.type === 'Remote' ? 'default' : 'outline'}>
-                          {internship.type}
-                        </Badge>
                       </div>
                     </CardHeader>
-                    
+
                     <CardContent>
-                      <p className="text-muted-foreground mb-4">{internship.description || 'No description available'}</p>
-                      
-                      <div className="flex flex-wrap gap-2 mb-4">
-                        {(internship.skills || []).map((skill:string) => (
+                      {internship.description && (
+                        <p className="text-muted-foreground mb-4">{internship.description}</p>
+                      )}
+
+                      <div className="flex flex-wrap items-center gap-2 mb-4">
+                        {(internship.skills || []).length === 0 && listingSkills(internship).length > 0 && (
+                          <span className="text-xs text-muted-foreground" title="This listing does not state its skills; these are inferred from the title.">
+                            Likely skills:
+                          </span>
+                        )}
+                        {listingSkills(internship).map((skill:string) => (
                           <Badge key={skill} variant="outline" className="text-xs">
                             {skill}
                           </Badge>
                         ))}
                       </div>
-                      
-                      <div className="flex items-center justify-between">
-                        <div className="flex items-center gap-4 text-sm text-muted-foreground">
+
+                      {/* Recommendation Breakdown */}
+                      {getRecommendationResult(internship.id) && (
+                        <div className="bg-gray-50 p-3 rounded-lg mb-4 border border-gray-100">
+                          <div
+                            className="flex items-center justify-between cursor-pointer"
+                            role="button"
+                            tabIndex={0}
+                            aria-expanded={expandedExplanations.has(internship.id)}
+                            onKeyDown={activateOnKey}
+                            onClick={() => toggleExplanation(internship.id)}
+                          >
+                            <span className="text-xs font-medium text-gray-700 flex items-center gap-1">
+                              <Info className="h-3 w-3" /> Why this match?
+                            </span>
+                            <span className="text-xs text-gray-500">
+                              {expandedExplanations.has(internship.id) ? 'Hide details' : 'Show details'}
+                            </span>
+                          </div>
+                          {expandedExplanations.has(internship.id) && (
+                            <div className="mt-3 space-y-2 text-sm">
+                              <p className="text-gray-700 italic mb-2">"{getRecommendationResult(internship.id)?.score.explanation}"</p>
+                              <div className="grid grid-cols-2 gap-2 match-factor-grid">
+                                {getRecommendationResult(internship.id)?.score.factors.filter(factor => factor.applies !== false).map((factor, idx) => (
+                                  <div key={idx} className="flex justify-between items-center text-xs" title={factor.details}>
+                                    <span className="text-gray-600">{factor.name}</span>
+                                    <div className="flex items-center gap-2">
+                                      <div className="w-16 bg-gray-200 rounded-full h-1.5" aria-hidden="true">
+                                        <div
+                                          className={`h-1.5 rounded-full ${
+                                            factor.score >= 70 ? 'bg-green-500' :
+                                            factor.score >= 40 ? 'bg-yellow-500' : 'bg-gray-400'
+                                          }`}
+                                          style={{ width: `${Math.max(0, Math.min(100, factor.score))}%` }}
+                                        />
+                                      </div>
+                                      <span className="font-medium w-8 text-right">{Math.round(factor.score)}%</span>
+                                    </div>
+                                  </div>
+                                ))}
+                              </div>
+                              {/* What the percentage could not take into account, and why. */}
+                              {(() => {
+                                const unused = (getRecommendationResult(internship.id)?.score.factors || [])
+                                  .filter(factor => factor.applies === false && factor.name !== 'Profile Completion Bonus');
+                                if (unused.length === 0) return null;
+                                return (
+                                  <p className="text-xs text-gray-600 pt-1">
+                                    Not counted: {unused.map(factor => `${factor.name === 'CGPA Match' ? 'CGPA' : factor.name.replace(' Match', '').toLowerCase()} (${factor.details.charAt(0).toLowerCase()}${factor.details.slice(1)})`).join('; ')}.
+                                  </p>
+                                );
+                              })()}
+                              {(getRecommendationResult(internship.id)?.score.matchedSkills.length ?? 0) > 0 && (
+                                <div className="pt-2 border-t border-gray-200 mt-2">
+                                  <span className="text-xs text-green-700 font-medium">Matched Skills: </span>
+                                  {getRecommendationResult(internship.id)?.score.matchedSkills.join(', ')}
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </div>
+                      )}
+
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex flex-wrap items-center gap-4 text-sm text-muted-foreground">
                           <span>💰 {internship.stipend || 'Not specified'}</span>
                           <span>📅 {internship.posted || 'Recently'}</span>
-                          <span>👥 {internship.applicants || 0} applicants</span>
+                          {/* A student can only see their own applications, so a count is
+                              shown only when there is one to show (never a false "0"). */}
+                          {(internship.applicants || 0) > 0 && (
+                            <span>👥 {internship.applicants} applicant{internship.applicants === 1 ? '' : 's'}</span>
+                          )}
                         </div>
                         <div className="flex gap-2">
-                          <Button 
-                            variant="outline" 
+                          <Button
+                            variant="outline"
                             size="sm"
                             onClick={() => handleSaveInternship(internship.id)}
                             className={savedInternships.has(internship.id) ? 'bg-yellow-50 text-yellow-700 border-yellow-200' : ''}
@@ -1045,8 +1273,8 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                             <Star className={`mr-2 h-4 w-4 ${savedInternships.has(internship.id) ? 'fill-current' : ''}`} />
                             {savedInternships.has(internship.id) ? 'Saved' : 'Save'}
                           </Button>
-                          <Button 
-                            size="sm" 
+                          <Button
+                            size="sm"
                             className="bg-blue-600 hover:bg-blue-700"
                             onClick={() => handleApplyInternship(internship.id)}
                             disabled={appliedInternships.has(internship.id)}
@@ -1069,12 +1297,22 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                   </Card>
                 </motion.div>
               ))}
+                    {filteredInternships.length > visibleCount && (
+                      <div className="flex flex-col items-center gap-2 py-4">
+                        <p className="text-sm text-muted-foreground">
+                          Showing the {visibleCount} best matches of {filteredInternships.length}
+                        </p>
+                        <Button variant="outline" onClick={() => setVisibleCount(count => count + FEED_PAGE_SIZE)}>
+                          Show {Math.min(FEED_PAGE_SIZE, filteredInternships.length - visibleCount)} more
+                        </Button>
+                      </div>
+                    )}
                   </div>
                 )}
               </>
             )}
           </TabsContent>
-          
+
           {/* Profile Builder */}
           <TabsContent value="profile" className="space-y-6">
             <motion.div
@@ -1103,8 +1341,8 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                     </p>
                   </div>
                   {profileCompletion() >= 80 && (
-                    <Button 
-                      className="mt-4 w-full" 
+                    <Button
+                      className="mt-4 w-full"
                       onClick={() => setActiveTab('feed')}
                     >
                       Profile Complete - Browse Internships →
@@ -1223,7 +1461,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                 </CardContent>
               </Card>
             </motion.div>
-            
+
             <div className="grid gap-6 md:grid-cols-2">
               <motion.div
                 initial={{ opacity: 0, x: -20 }}
@@ -1255,6 +1493,9 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                           {getFilteredColleges().map((college) => (
                             <div
                               key={college}
+                              role="button"
+                              tabIndex={0}
+                              onKeyDown={activateOnKey}
                               className="px-3 py-2 text-sm cursor-pointer hover:bg-muted"
                               onClick={() => {
                                 updateProfile({ university: college });
@@ -1268,11 +1509,11 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                         </div>
                       )}
                     </div>
-                    
+
                     <div className="space-y-2">
                       <Label htmlFor="course">Course/Degree</Label>
                       <Select value={profile.course} onValueChange={(value:string) => updateProfile({ course: value })}>
-                        <SelectTrigger>
+                        <SelectTrigger id="course" aria-label="Course or degree">
                           <SelectValue placeholder="Select your course" />
                         </SelectTrigger>
                         <SelectContent>
@@ -1282,12 +1523,12 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                         </SelectContent>
                       </Select>
                     </div>
-                    
+
                     <div className="grid grid-cols-2 gap-4">
                       <div className="space-y-2">
                         <Label htmlFor="year">Year of Study</Label>
                         <Select value={profile.year} onValueChange={(value:string) => updateProfile({ year: value })}>
-                          <SelectTrigger>
+                          <SelectTrigger id="year" aria-label="Year of study">
                             <SelectValue placeholder="Select year" />
                           </SelectTrigger>
                           <SelectContent>
@@ -1297,7 +1538,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                           </SelectContent>
                         </Select>
                       </div>
-                      
+
                       <div className="space-y-2">
                         <Label htmlFor="cgpa">CGPA/Percentage</Label>
                         <Input
@@ -1308,11 +1549,11 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                         />
                       </div>
                     </div>
-                    
+
                     <div className="space-y-2">
                       <Label htmlFor="location">Preferred Location</Label>
                       <Select value={profile.location} onValueChange={(value:string) => updateProfile({ location: value })}>
-                        <SelectTrigger>
+                        <SelectTrigger id="location" aria-label="Preferred location">
                           <SelectValue placeholder="Select preferred location" />
                         </SelectTrigger>
                         <SelectContent>
@@ -1322,10 +1563,52 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                         </SelectContent>
                       </Select>
                     </div>
+
+                    {/* Optional preferences: used in the match only when filled in. */}
+                    <div className="grid gap-4 sm:grid-cols-2">
+                      <div className="space-y-2">
+                        <Label htmlFor="work-mode">Preferred Work Mode</Label>
+                        <Select
+                          value={profile.preferredWorkMode || NO_PREFERENCE}
+                          onValueChange={(value: string) => updateProfile({ preferredWorkMode: value === NO_PREFERENCE ? '' : value })}
+                        >
+                          <SelectTrigger id="work-mode" aria-label="Preferred work mode">
+                            <SelectValue />
+                          </SelectTrigger>
+                          <SelectContent>
+                            <SelectItem value={NO_PREFERENCE}>No preference</SelectItem>
+                            {WORK_MODES.map(mode => (
+                              <SelectItem key={mode} value={mode}>{mode}</SelectItem>
+                            ))}
+                          </SelectContent>
+                        </Select>
+                      </div>
+                      <div className="space-y-2">
+                        <Label htmlFor="min-stipend">Minimum Stipend (₹ per month)</Label>
+                        <Input
+                          id="min-stipend"
+                          type="number"
+                          inputMode="numeric"
+                          min={0}
+                          step={1000}
+                          placeholder="No minimum"
+                          value={profile.minStipend ?? ''}
+                          onChange={(e) => setProfile((prev: any) => ({ ...prev, minStipend: e.target.value }))}
+                          onBlur={(e) => {
+                            // Saved when the field is left, not on every keystroke.
+                            const amount = Math.round(Number(e.target.value));
+                            updateProfile({ minStipend: amount > 0 ? String(amount) : '' });
+                          }}
+                        />
+                      </div>
+                    </div>
+                    <p className="text-xs text-muted-foreground">
+                      Work mode and stipend are optional. When filled in, they count towards each listing's match percentage.
+                    </p>
                   </CardContent>
                 </Card>
               </motion.div>
-              
+
               <motion.div
                 initial={{ opacity: 0, x: 20 }}
                 animate={{ opacity: 1, x: 0 }}
@@ -1344,16 +1627,17 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                       <div className="flex gap-2">
                         <Input
                           placeholder="Enter a skill"
+                          aria-label="Skill to add"
                           value={newSkill}
                           onChange={(e) => setNewSkill(e.target.value)}
                           onKeyPress={(e) => e.key === 'Enter' && addSkill()}
                         />
-                        <Button onClick={addSkill} size="sm">
-                          <Plus className="h-4 w-4" />
+                        <Button onClick={addSkill} size="sm" aria-label="Add skill" title="Add skill">
+                          <Plus className="h-4 w-4" aria-hidden="true" />
                         </Button>
                       </div>
                     </div>
-                    
+
                     <div className="space-y-2">
                       <Label>Your Skills</Label>
                       <div className="flex flex-wrap gap-2">
@@ -1366,8 +1650,8 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                           >
                             <Badge variant="secondary" className="gap-1">
                               {skill}
-                              <button onClick={() => removeSkill(skill)}>
-                                <X className="h-3 w-3" />
+                              <button type="button" onClick={() => removeSkill(skill)} aria-label={`Remove ${skill}`}>
+                                <X className="h-3 w-3" aria-hidden="true" />
                               </button>
                             </Badge>
                           </motion.div>
@@ -1383,7 +1667,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                 </Card>
               </motion.div>
             </div>
-            
+
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -1395,9 +1679,9 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                     About Me
                     <div className="flex gap-2">
                       {!profile.bio && (
-                        <Button 
-                          variant="outline" 
-                          size="sm" 
+                        <Button
+                          variant="outline"
+                          size="sm"
                           onClick={handleAIBioCompletion}
                         >
                           <Sparkles className="h-4 w-4 mr-2" />
@@ -1405,9 +1689,9 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                         </Button>
                       )}
                       {!editingBio && profile.bio && (
-                        <Button 
-                          variant="outline" 
-                          size="sm" 
+                        <Button
+                          variant="outline"
+                          size="sm"
                           onClick={() => {
                             setEditingBio(true);
                             setTempBio(profile.bio);
@@ -1434,8 +1718,8 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                           <Check className="h-4 w-4 mr-2" />
                           Update
                         </Button>
-                        <Button 
-                          variant="outline" 
+                        <Button
+                          variant="outline"
                           onClick={() => {
                             setEditingBio(false);
                             setTempBio('');
@@ -1461,7 +1745,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
               </Card>
             </motion.div>
           </TabsContent>
-          
+
           {/* My Activity */}
           <TabsContent value="applications" className="space-y-6">
             <motion.div
@@ -1481,7 +1765,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                     )}
                   </TabsTrigger>
                 </TabsList>
-                
+
                 <TabsContent value="applied" className="space-y-4">
                   <Card>
                     <CardHeader>
@@ -1496,11 +1780,11 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                           {applications.map((application: any) => {
                             const internship = availableInternships.find(i => i.id === application.internshipId);
                             if (!internship) return null;
-                            
+
                             // Determine status badge variant and text
                             let statusVariant: "default" | "secondary" | "destructive" | "outline" = "outline";
                             let statusText = application.status || "Applied";
-                            
+
                             if (application.status === "Accepted") {
                               statusVariant = "default";
                               statusText = "Accepted";
@@ -1511,7 +1795,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                               statusVariant = "secondary";
                               statusText = "Under Review";
                             }
-                            
+
                             return (
                               <div key={application.id} className="flex items-center justify-between p-4 border rounded-lg">
                                 <div className="flex-1">
@@ -1542,8 +1826,8 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                           <Briefcase className="h-12 w-12 mx-auto mb-4 opacity-50" />
                           <p>No applications yet</p>
                           <p className="text-sm">Start applying to internships to see them here</p>
-                          <Button 
-                            variant="outline" 
+                          <Button
+                            variant="outline"
                             className="mt-4"
                             onClick={() => setActiveTab('feed')}
                           >
@@ -1554,7 +1838,7 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                     </CardContent>
                   </Card>
                 </TabsContent>
-                
+
                 <TabsContent value="starred" className="space-y-4">
                   <Card>
                     <CardHeader>
@@ -1589,16 +1873,16 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                                   </div>
                                 </div>
                                 <div className="flex gap-2 ml-4">
-                                  <Button 
-                                    variant="outline" 
+                                  <Button
+                                    variant="outline"
                                     size="sm"
                                     onClick={() => handleSaveInternship(internship.id)}
                                   >
                                     <X className="h-4 w-4 mr-1" />
                                     Remove
                                   </Button>
-                                  <Button 
-                                    size="sm" 
+                                  <Button
+                                    size="sm"
                                     className="bg-blue-600 hover:bg-blue-700"
                                     onClick={() => handleApplyInternship(internship.id)}
                                     disabled={appliedInternships.has(internship.id)}
@@ -1625,8 +1909,8 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                           <Star className="h-12 w-12 mx-auto mb-4 opacity-50" />
                           <p>No starred internships yet</p>
                           <p className="text-sm">Star internships you're interested in to save them for later</p>
-                          <Button 
-                            variant="outline" 
+                          <Button
+                            variant="outline"
                             className="mt-4"
                             onClick={() => setActiveTab('feed')}
                           >
@@ -1653,11 +1937,15 @@ export function UserDashboard({ user, onLogout, onBack, dataStore }: UserDashboa
                       {messages.length > 0 ? (
                         <div className="space-y-4">
                           {messages.map((message: any) => (
-                            <Card 
-                              key={message.id} 
+                            <Card
+                              key={message.id}
                               className={`cursor-pointer transition-all ${
                                 !message.read ? 'border-blue-200 bg-blue-50' : ''
                               }`}
+                              role="button"
+                              tabIndex={0}
+                              aria-label={`${message.read ? '' : 'Unread message: '}${message.subject || 'Message'}`}
+                              onKeyDown={activateOnKey}
                               onClick={() => markMessageAsRead(message.id)}
                             >
                               <CardHeader className="pb-2">

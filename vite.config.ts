@@ -51,9 +51,23 @@
         '@': path.resolve(__dirname, './src'),
       },
     },
+    // Debug logging is removed from the production bundle; warnings and errors stay.
+    esbuild: {
+      pure: ['console.log', 'console.debug'],
+    },
     build: {
       target: 'esnext',
       outDir: 'build',
+      rollupOptions: {
+        output: {
+          // Libraries change far less often than the app, so they are cached separately.
+          manualChunks: {
+            react: ['react', 'react-dom'],
+            supabase: ['@supabase/supabase-js'],
+            motion: ['motion'],
+          },
+        },
+      },
     },
     server: {
       port: 3000,

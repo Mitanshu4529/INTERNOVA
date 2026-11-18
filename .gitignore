@@ -1,0 +1,18 @@
+# Dependencies (restore with `npm install`)
+node_modules/
+
+# Build output and caches
+build/
+dist/
+.dist/
+.vitest-cache/
+*.local
+
+# Environment files (copy .env.example to .env)
+.env
+.env.*
+!.env.example
+
+# Editor / tooling
+.claude/
+.DS_Store

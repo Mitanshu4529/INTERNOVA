@@ -15,12 +15,12 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
       {/* Navigation */}
       <nav className="border-b bg-background/95 backdrop-blur supports-[backdrop-filter]:bg-background/60">
         <div className="container flex h-16 items-center justify-between">
-          <div className="flex items-center space-x-2 cursor-pointer" onClick={() => window.location.reload()}>
-            <div className="h-8 w-8 bg-primary rounded-lg flex items-center justify-center">
+          <button type="button" className="flex items-center space-x-2 cursor-pointer" onClick={() => window.location.reload()} aria-label="Internova home">
+            <span className="h-8 w-8 bg-primary rounded-lg flex items-center justify-center" aria-hidden="true">
               <Target className="h-5 w-5 text-primary-foreground" />
-            </div>
+            </span>
             <span className="text-xl font-semibold">Internova</span>
-          </div>
+          </button>
           <Button onClick={() => onGetStarted()}>
             Get Started
             <ArrowRight className="ml-2 h-4 w-4" />
@@ -29,9 +29,9 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
       </nav>
 
       {/* Hero Section */}
-      <section className="relative py-20 lg:py-32">
+      <section className="relative py-20 lg:py-32" role="main">
         <div className="container">
-          <motion.div 
+          <motion.div
             initial={{ opacity: 0, y: 20 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.6 }}
@@ -46,7 +46,7 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
                 🚀 Your Gateway to Professional Growth
               </Badge>
             </motion.div>
-            <motion.h1 
+            <motion.h1
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.2 }}
@@ -57,16 +57,16 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
                 Internship Match
               </span>
             </motion.h1>
-            <motion.p 
+            <motion.p
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.3 }}
               className="text-xl text-muted-foreground mb-8 max-w-2xl mx-auto"
             >
-              Connect talented students with leading companies through our AI-powered matching system. 
+              Connect talented students with leading companies through our AI-powered matching system.
               Build your future with personalized internship recommendations.
             </motion.p>
-            <motion.div 
+            <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
               transition={{ delay: 0.4 }}
@@ -93,7 +93,7 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
               Our platform bridges the gap between ambitious students and forward-thinking companies
             </p>
           </div>
-          
+
           <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-8">
             <motion.div
               initial={{ opacity: 0, y: 20 }}
@@ -110,7 +110,7 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
                 </p>
               </Card>
             </motion.div>
-            
+
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -126,7 +126,7 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
                 </p>
               </Card>
             </motion.div>
-            
+
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -142,7 +142,7 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
                 </p>
               </Card>
             </motion.div>
-            
+
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -158,7 +158,7 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
                 </p>
               </Card>
             </motion.div>
-            
+
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}
@@ -174,7 +174,7 @@ export function LandingPage({ onGetStarted }: LandingPageProps) {
                 </p>
               </Card>
             </motion.div>
-            
+
             <motion.div
               initial={{ opacity: 0, y: 20 }}
               animate={{ opacity: 1, y: 0 }}

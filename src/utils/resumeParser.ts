@@ -1,8 +1,27 @@
-import * as pdfjsLib from 'pdfjs-dist';
 import { supabase } from "./supabaseClient";
+import { isDemoMode } from "./mode";
 
-// FIXED: Use exact version match for the worker to prevent "Version Mismatch" errors
-pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js`;
+// The PDF reader is large, so it is only downloaded when a PDF is actually
+// uploaded. Its worker is bundled with the app (the `?url` import), so the
+// worker always matches the library version and nothing is fetched from a CDN.
+let pdfjsPromise: Promise<typeof import('pdfjs-dist')> | null = null;
+function loadPdfjs() {
+  if (!pdfjsPromise) {
+    // The "legacy" build carries the polyfills older browsers need; the
+    // default build only runs in the very latest ones.
+    pdfjsPromise = Promise.all([
+      import('pdfjs-dist/legacy/build/pdf.mjs') as Promise<typeof import('pdfjs-dist')>,
+      import('pdfjs-dist/legacy/build/pdf.worker.min.mjs?url'),
+    ]).then(([pdfjsLib, worker]) => {
+      pdfjsLib.GlobalWorkerOptions.workerSrc = worker.default;
+      return pdfjsLib;
+    }).catch(err => {
+      pdfjsPromise = null; // a failed download can be retried on the next upload
+      throw err;
+    });
+  }
+  return pdfjsPromise;
+}
 
 // Common tech skills for fallback extraction
 const COMMON_SKILLS = [
@@ -21,6 +40,7 @@ export async function extractTextFromFile(file: File): Promise<string> {
     // Handle PDF files
     if (file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf')) {
       const arrayBuffer = await file.arrayBuffer();
+      const pdfjsLib = await loadPdfjs();
       const pdf = await pdfjsLib.getDocument({ data: arrayBuffer }).promise;
       let fullText = '';
 
@@ -30,16 +50,16 @@ export async function extractTextFromFile(file: File): Promise<string> {
         const pageText = textContent.items.map((item: any) => item.str).join(' ');
         fullText += pageText + '\n';
       }
-      
+
       return fullText;
     }
-    
+
     // Handle text files
     if (file.type.startsWith('text/') || file.name.toLowerCase().endsWith('.txt')) {
       const text = await file.text();
       return text;
     }
-    
+
     // For other file types, try to read as text (might work for some formats)
     try {
       const text = await file.text();
@@ -51,7 +71,7 @@ export async function extractTextFromFile(file: File): Promise<string> {
       // If text extraction fails, use filename as fallback
       console.warn("Could not extract text from file, using filename:", e);
     }
-    
+
     // Fallback: use filename and file type
     return `File: ${file.name}\nType: ${file.type || 'Unknown'}`;
   } catch (error) {
@@ -61,55 +81,56 @@ export async function extractTextFromFile(file: File): Promise<string> {
   }
 }
 
-// Extract skills using AI, with fallback to keyword matching
-export async function parseResumeWithAI(text: string): Promise<string[]> {
-  console.log("Extracting skills from text...");
-  
-  let extractedSkills: string[] = [];
-  
-  // Try AI extraction first
-  try {
-    const { data, error } = await supabase.functions.invoke('openai-resume-api', {
-      body: { resumeText: text }
-    });
+const MAX_RESUME_CHARS = 20000;
 
-    if (!error && data && !data.error && data.skills) {
-      extractedSkills = data.skills || [];
-      console.log("AI Extracted Skills:", extractedSkills);
-    }
-  } catch (error) {
-    console.warn("AI extraction failed, using keyword matching:", error);
-  }
-  
-  // Fallback: Extract skills using keyword matching
-  if (extractedSkills.length < 5) {
-    const textLower = text.toLowerCase();
-    const foundSkills: string[] = [];
-    
-    for (const skill of COMMON_SKILLS) {
-      if (textLower.includes(skill.toLowerCase())) {
-        foundSkills.push(skill);
-        if (foundSkills.length >= 5) break;
+// Matches a skill as a whole term, not as a substring: "Go" must not match
+// "google", "Java" must not match "JavaScript", "Git" must not match "digital".
+function containsSkill(textLower: string, skill: string): boolean {
+  const escaped = skill.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  return new RegExp(`(^|[^a-z0-9+#])${escaped}(?![a-z0-9+#])`, 'i').test(textLower);
+}
+
+export function extractSkillsByKeyword(text: string): string[] {
+  const textLower = text.toLowerCase();
+  return COMMON_SKILLS.filter(skill => containsSkill(textLower, skill));
+}
+
+// Extract skills using AI, with fallback to keyword matching.
+// Returns only skills actually found in the text; an empty array means none were found.
+export async function parseResumeWithAI(text: string): Promise<string[]> {
+  let extractedSkills: string[] = [];
+
+  // The AI function needs a signed-in account (it spends a paid API quota), so
+  // the browser-only demo goes straight to keyword matching.
+  if (!isDemoMode()) {
+    try {
+      const { data, error } = await supabase.functions.invoke('parse-resume', {
+        body: { resumeText: text.slice(0, MAX_RESUME_CHARS) }
+      });
+
+      if (!error && data && !data.error && Array.isArray(data.skills)) {
+        extractedSkills = data.skills
+          .filter((skill: unknown): skill is string => typeof skill === 'string' && skill.trim().length > 0)
+          .map((skill: string) => skill.trim().slice(0, 60));
+      } else if (error) {
+        console.warn("AI extraction error:", error);
       }
+    } catch (error) {
+      console.warn("AI extraction failed, using keyword matching:", error);
     }
-    
-    // Merge AI skills with keyword-matched skills
-    extractedSkills = Array.from(new Set([...extractedSkills, ...foundSkills]));
   }
-  
-  // Ensure we return exactly 5 skills
+
   if (extractedSkills.length === 0) {
-    // Ultimate fallback: return 5 common skills
-    extractedSkills = ['Communication', 'Teamwork', 'Problem Solving', 'Time Management', 'Adaptability'];
-  } else if (extractedSkills.length < 5) {
-    // If we have less than 5, add some common ones
-    const remaining = COMMON_SKILLS.filter(s => !extractedSkills.includes(s)).slice(0, 5 - extractedSkills.length);
-    extractedSkills = [...extractedSkills, ...remaining].slice(0, 5);
-  } else {
-    // If we have more than 5, take the first 5
-    extractedSkills = extractedSkills.slice(0, 5);
+    extractedSkills = extractSkillsByKeyword(text);
   }
-  
-  console.log("Final extracted skills (5):", extractedSkills);
-  return extractedSkills;
+
+  // Deduplicate case-insensitively and keep a reasonable number.
+  const seen = new Set<string>();
+  const unique = extractedSkills.filter(skill => {
+    const key = skill.toLowerCase();
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
+  return unique.slice(0, 15);
 }

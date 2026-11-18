@@ -9,12 +9,12 @@ import { Label } from './ui/label';
 import { Textarea } from './ui/textarea';
 import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from './ui/select';
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogTrigger } from './ui/dialog';
-import { 
-  Target, 
-  LogOut, 
-  Building2, 
-  Plus, 
-  Users, 
+import {
+  Target,
+  LogOut,
+  Building2,
+  Plus,
+  Users,
   Eye,
   Edit,
   Trash2,
@@ -31,6 +31,17 @@ import {
   Check,
   X as XIcon
 } from 'lucide-react';
+import { notify } from '../utils/notify';
+
+// "Posted" is stored as a timestamp for listings made here and as free text
+// ("2 days ago") for imported ones: show a date for the first, the text as is
+// for the second.
+const formatPosted = (value: unknown): string => {
+  if (typeof value !== 'string' || !value.trim()) return 'recently';
+  if (!/^\d{4}-\d{2}-\d{2}T/.test(value)) return value;
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? value : date.toLocaleDateString(undefined, { day: 'numeric', month: 'short', year: 'numeric' });
+};
 
 interface CompanyDashboardProps {
   user: any;
@@ -94,17 +105,21 @@ export function CompanyDashboard({ user, onLogout, onBack, dataStore }: CompanyD
         setIsLoading(false);
       }
     };
-    
+
     loadData();
+
+    // Polling for new applications
+    const interval = setInterval(loadData, 10000);
+    return () => clearInterval(interval);
   }, [refreshKey, user.id, user.profile?.company, user.name, dataStore]);
 
   const handleCreateInternship = async (e: React.FormEvent) => {
     e.preventDefault();
-    
+
     try {
       // Parse skills string into array
       const skillsArray = newInternship.skills.split(',').map(skill => skill.trim()).filter(Boolean);
-      
+
       // Create internship in dataStore
       const internshipData = {
         title: newInternship.title,
@@ -123,9 +138,9 @@ export function CompanyDashboard({ user, onLogout, onBack, dataStore }: CompanyD
           experience: 'Beginner'
         }
       };
-      
+
       await dataStore.createInternship(user.id, internshipData);
-      
+
       // Reset form and switch to internships tab
       setNewInternship({
         title: '',
@@ -137,14 +152,14 @@ export function CompanyDashboard({ user, onLogout, onBack, dataStore }: CompanyD
         skills: '',
         requirements: '',
       });
-      
+
       setShowNewInternshipForm(false);
       setActiveTab('internships');
       setRefreshKey(prev => prev + 1); // Force refresh
-      alert('Internship posted successfully!');
+      notify('Internship posted successfully!');
     } catch (error) {
       console.error('Error creating internship:', error);
-      alert('Failed to create internship. Please try again.');
+      notify('Failed to create internship. Please try again.');
     }
   };
 
@@ -153,17 +168,17 @@ export function CompanyDashboard({ user, onLogout, onBack, dataStore }: CompanyD
       try {
         await dataStore.deleteInternship(internshipId);
         setRefreshKey(prev => prev + 1); // Force refresh
-        alert('Internship deleted successfully!');
+        notify('Internship deleted successfully!');
       } catch (error) {
         console.error('Error deleting internship:', error);
-        alert('Failed to delete internship. Please try again.');
+        notify('Failed to delete internship. Please try again.');
       }
     }
   };
 
   const handleSendMessage = async (studentEmail: string, type: 'message' | 'interview' | 'acceptance' = 'message') => {
     if (!messageContent.trim()) {
-      alert('Please enter a message');
+      notify('Please enter a message');
       return;
     }
 
@@ -180,22 +195,22 @@ export function CompanyDashboard({ user, onLogout, onBack, dataStore }: CompanyD
 
     try {
       await dataStore.sendMessage(user.email, studentEmail, subject, content, type, selectedStudent?.internshipId);
-      
+
       setMessageDialogOpen(false);
       setMessageContent('');
       setMessageSubject('');
       setRefreshKey(prev => prev + 1); // Refresh to show updated data
-      alert('Message sent successfully!');
+      notify('Message sent successfully!');
     } catch (error) {
       console.error('Error sending message:', error);
-      alert('Failed to send message. Please try again.');
+      notify('Failed to send message. Please try again.');
     }
   };
 
   const handleAcceptApplication = async (application: any) => {
     try {
       await dataStore.updateApplicationStatus(application.id, 'Accepted');
-      
+
       // Send acceptance message
       const subject = 'Congratulations! Application Accepted';
       const content = `Dear ${application.studentDetails.name},
@@ -210,19 +225,19 @@ Best regards,
 ${user.profile?.company || user.name} Team`;
 
       await dataStore.sendMessage(user.email, application.studentDetails.email, subject, content, 'acceptance', application.internshipId);
-      
+
       setRefreshKey(prev => prev + 1);
-      alert('Application accepted and student notified!');
+      notify('Application accepted and student notified!');
     } catch (error) {
       console.error('Error accepting application:', error);
-      alert('Failed to accept application. Please try again.');
+      notify('Failed to accept application. Please try again.');
     }
   };
 
   const handleRejectApplication = async (application: any) => {
     try {
       await dataStore.updateApplicationStatus(application.id, 'Rejected');
-      
+
       // Send rejection message
       const subject = 'Application Update';
       const content = `Dear ${application.studentDetails.name},
@@ -237,12 +252,12 @@ Best regards,
 ${user.profile?.company || user.name} Team`;
 
       await dataStore.sendMessage(user.email, application.studentDetails.email, subject, content, 'rejection', application.internshipId);
-      
+
       setRefreshKey(prev => prev + 1);
-      alert('Application rejected and student notified.');
+      notify('Application rejected and student notified.');
     } catch (error) {
       console.error('Error rejecting application:', error);
-      alert('Failed to reject application. Please try again.');
+      notify('Failed to reject application. Please try again.');
     }
   };
 
@@ -253,20 +268,20 @@ ${user.profile?.company || user.name} Team`;
       location: internship.location,
       type: internship.type,
       duration: internship.duration,
-      stipend: internship.stipendAmount.toString(),
-      description: internship.description,
-      skills: internship.skills.join(', ')
+      stipend: internship.stipendAmount != null ? String(internship.stipendAmount) : '',
+      description: internship.description || '',
+      skills: (internship.skills || []).join(', ')
     });
   };
 
   const handleUpdateInternship = async () => {
     if (!editInternshipData.title.trim()) {
-      alert('Please enter a title');
+      notify('Please enter a title');
       return;
     }
 
     const skillsArray = editInternshipData.skills.split(',').map((skill: string) => skill.trim()).filter(Boolean);
-    
+
     const updates = {
       title: editInternshipData.title,
       location: editInternshipData.location,
@@ -283,10 +298,10 @@ ${user.profile?.company || user.name} Team`;
       setEditingInternship(null);
       setEditInternshipData(null);
       setRefreshKey(prev => prev + 1);
-      alert('Internship updated successfully!');
+      notify('Internship updated successfully!');
     } catch (error) {
       console.error('Error updating internship:', error);
-      alert('Failed to update internship. Please try again.');
+      notify('Failed to update internship. Please try again.');
     }
   };
 
@@ -300,15 +315,15 @@ ${user.profile?.company || user.name} Team`;
               <ArrowLeft className="h-4 w-4 mr-2" />
               Back
             </Button>
-            <div className="flex items-center space-x-2 cursor-pointer" onClick={onBack}>
-              <div className="h-8 w-8 bg-primary rounded-lg flex items-center justify-center">
+            <button type="button" className="flex items-center space-x-2 cursor-pointer" onClick={onBack} aria-label="Internova home">
+              <span className="h-8 w-8 bg-primary rounded-lg flex items-center justify-center" aria-hidden="true">
                 <Target className="h-5 w-5 text-primary-foreground" />
-              </div>
+              </span>
               <span className="text-xl font-semibold">Internova</span>
               <Badge variant="outline">Company</Badge>
-            </div>
+            </button>
           </div>
-          
+
           <div className="flex items-center space-x-4">
             <Avatar>
               <AvatarFallback>
@@ -319,23 +334,24 @@ ${user.profile?.company || user.name} Team`;
               <p className="font-medium">{user.name}</p>
               <p className="text-sm text-muted-foreground">{user.email}</p>
             </div>
-            <Button variant="ghost" size="sm" onClick={onLogout}>
-              <LogOut className="h-4 w-4" />
+            <Button variant="ghost" size="sm" onClick={onLogout} aria-label="Log out" title="Log out">
+              <LogOut className="h-4 w-4" aria-hidden="true" />
             </Button>
           </div>
         </div>
       </header>
 
       {/* Main Content */}
-      <div className="container py-6">
+      <div className="container py-6" role="main">
+        <h1 className="sr-only">Company dashboard</h1>
         <Tabs value={activeTab} onValueChange={setActiveTab}>
           <div className="flex justify-center mb-6">
             <div className="inline-flex bg-muted p-1 rounded-lg">
               <button
                 onClick={() => setActiveTab('overview')}
                 className={`px-4 py-2 text-sm font-medium rounded-md transition-all ${
-                  activeTab === 'overview' 
-                    ? 'bg-background shadow-sm text-foreground' 
+                  activeTab === 'overview'
+                    ? 'bg-background shadow-sm text-foreground'
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
@@ -344,8 +360,8 @@ ${user.profile?.company || user.name} Team`;
               <button
                 onClick={() => setActiveTab('internships')}
                 className={`px-4 py-2 text-sm font-medium rounded-md transition-all ${
-                  activeTab === 'internships' 
-                    ? 'bg-background shadow-sm text-foreground' 
+                  activeTab === 'internships'
+                    ? 'bg-background shadow-sm text-foreground'
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
@@ -354,8 +370,8 @@ ${user.profile?.company || user.name} Team`;
               <button
                 onClick={() => setActiveTab('applicants')}
                 className={`px-4 py-2 text-sm font-medium rounded-md transition-all ${
-                  activeTab === 'applicants' 
-                    ? 'bg-background shadow-sm text-foreground' 
+                  activeTab === 'applicants'
+                    ? 'bg-background shadow-sm text-foreground'
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
@@ -364,8 +380,8 @@ ${user.profile?.company || user.name} Team`;
               <button
                 onClick={() => setActiveTab('create')}
                 className={`px-4 py-2 text-sm font-medium rounded-md transition-all ${
-                  activeTab === 'create' 
-                    ? 'bg-background shadow-sm text-foreground' 
+                  activeTab === 'create'
+                    ? 'bg-background shadow-sm text-foreground'
                     : 'text-muted-foreground hover:text-foreground'
                 }`}
               >
@@ -373,7 +389,7 @@ ${user.profile?.company || user.name} Team`;
               </button>
             </div>
           </div>
-          
+
           {/* Overview Tab */}
           <TabsContent value="overview" className="space-y-6">
             <div className="grid gap-6 md:grid-cols-2 lg:grid-cols-4">
@@ -388,7 +404,7 @@ ${user.profile?.company || user.name} Team`;
                   </div>
                 </CardContent>
               </Card>
-              
+
               <Card>
                 <CardContent className="p-6">
                   <div className="flex items-center justify-between">
@@ -400,7 +416,7 @@ ${user.profile?.company || user.name} Team`;
                   </div>
                 </CardContent>
               </Card>
-              
+
               <Card>
                 <CardContent className="p-6">
                   <div className="flex items-center justify-between">
@@ -412,7 +428,7 @@ ${user.profile?.company || user.name} Team`;
                   </div>
                 </CardContent>
               </Card>
-              
+
               <Card>
                 <CardContent className="p-6">
                   <div className="flex items-center justify-between">
@@ -425,7 +441,7 @@ ${user.profile?.company || user.name} Team`;
                 </CardContent>
               </Card>
             </div>
-            
+
             <Card>
               <CardHeader>
                 <CardTitle>Recent Applications</CardTitle>
@@ -471,7 +487,7 @@ ${user.profile?.company || user.name} Team`;
               </CardContent>
             </Card>
           </TabsContent>
-          
+
           {/* My Internships Tab */}
           <TabsContent value="internships" className="space-y-6">
             <div className="flex justify-between items-center">
@@ -484,7 +500,7 @@ ${user.profile?.company || user.name} Team`;
                 Post New Internship
               </Button>
             </div>
-            
+
             <div className="grid gap-6">
               {companyInternships.length > 0 ? companyInternships.map((internship: any) => (
                 <Card key={internship.id}>
@@ -515,10 +531,10 @@ ${user.profile?.company || user.name} Team`;
                       </div>
                     </div>
                   </CardHeader>
-                  
+
                   <CardContent>
                     <p className="text-muted-foreground mb-4">{internship.description}</p>
-                    
+
                     <div className="flex flex-wrap gap-2 mb-4">
                       {internship.skills.map((skill: string) => (
                         <Badge key={skill} variant="outline" className="text-xs">
@@ -526,7 +542,7 @@ ${user.profile?.company || user.name} Team`;
                         </Badge>
                       ))}
                     </div>
-                    
+
                     <div className="flex items-center justify-between">
                       <div className="flex items-center gap-4 text-sm text-muted-foreground">
                         <span className="flex items-center gap-1">
@@ -535,7 +551,7 @@ ${user.profile?.company || user.name} Team`;
                         </span>
                         <span className="flex items-center gap-1">
                           <Clock className="h-4 w-4" />
-                          Posted {internship.posted}
+                          Posted {formatPosted(internship.posted)}
                         </span>
                       </div>
                       <div className="flex gap-2">
@@ -574,15 +590,15 @@ ${user.profile?.company || user.name} Team`;
                                     />
                                   </div>
                                 </div>
-                                
+
                                 <div className="grid md:grid-cols-3 gap-4">
                                   <div>
                                     <Label htmlFor="edit-type">Work Type</Label>
-                                    <Select 
-                                      value={editInternshipData.type} 
+                                    <Select
+                                      value={editInternshipData.type}
                                       onValueChange={(value:string) => setEditInternshipData((prev: any) => ({ ...prev, type: value }))}
                                     >
-                                      <SelectTrigger>
+                                      <SelectTrigger aria-label="Work type">
                                         <SelectValue />
                                       </SelectTrigger>
                                       <SelectContent>
@@ -610,7 +626,7 @@ ${user.profile?.company || user.name} Team`;
                                     />
                                   </div>
                                 </div>
-                                
+
                                 <div>
                                   <Label htmlFor="edit-description">Description</Label>
                                   <Textarea
@@ -620,7 +636,7 @@ ${user.profile?.company || user.name} Team`;
                                     onChange={(e) => setEditInternshipData((prev: any) => ({ ...prev, description: e.target.value }))}
                                   />
                                 </div>
-                                
+
                                 <div>
                                   <Label htmlFor="edit-skills">Skills (comma separated)</Label>
                                   <Input
@@ -629,13 +645,13 @@ ${user.profile?.company || user.name} Team`;
                                     onChange={(e) => setEditInternshipData((prev:any) => ({ ...prev, skills: e.target.value }))}
                                   />
                                 </div>
-                                
+
                                 <div className="flex gap-2">
                                   <Button onClick={handleUpdateInternship} className="flex-1">
                                     Update Internship
                                   </Button>
-                                  <Button 
-                                    variant="outline" 
+                                  <Button
+                                    variant="outline"
                                     onClick={() => {
                                       setEditingInternship(null);
                                       setEditInternshipData(null);
@@ -648,13 +664,13 @@ ${user.profile?.company || user.name} Team`;
                             )}
                           </DialogContent>
                         </Dialog>
-                        
+
                         <Button variant="outline" size="sm" onClick={() => setActiveTab('applicants')}>
                           <Eye className="mr-2 h-4 w-4" />
                           View Applicants
                         </Button>
-                        <Button 
-                          variant="outline" 
+                        <Button
+                          variant="outline"
                           size="sm"
                           onClick={() => handleDeleteInternship(internship.id)}
                         >
@@ -678,14 +694,14 @@ ${user.profile?.company || user.name} Team`;
               )}
             </div>
           </TabsContent>
-          
+
           {/* Applicants Tab */}
           <TabsContent value="applicants" className="space-y-6">
             <div>
               <h2 className="text-2xl font-semibold">Applicants</h2>
               <p className="text-muted-foreground">Review and manage internship applications</p>
             </div>
-            
+
             <div className="grid gap-6">
               {companyApplications.length > 0 ? companyApplications.map((application: any) => {
                 const internship = companyInternships.find((i: any) => i.id === application.internshipId);
@@ -720,7 +736,7 @@ ${user.profile?.company || user.name} Team`;
                       </div>
                     </div>
                   </CardHeader>
-                  
+
                   <CardContent>
                     <div className="grid md:grid-cols-2 gap-4 mb-4">
                       <div>
@@ -744,14 +760,14 @@ ${user.profile?.company || user.name} Team`;
                       <div>
                         <p className="text-sm font-medium">Bio</p>
                         <p className="text-sm text-muted-foreground">
-                          {application.studentProfile.bio ? 
-                            `${application.studentProfile.bio.substring(0, 50)}...` : 
+                          {application.studentProfile.bio ?
+                            `${application.studentProfile.bio.substring(0, 50)}...` :
                             'No bio provided'
                           }
                         </p>
                       </div>
                     </div>
-                    
+
                     <div className="mb-4">
                       <p className="text-sm font-medium mb-2">Skills</p>
                       <div className="flex flex-wrap gap-2">
@@ -766,7 +782,7 @@ ${user.profile?.company || user.name} Team`;
                         )}
                       </div>
                     </div>
-                    
+
                     <div className="flex gap-2 flex-wrap">
                       <Dialog>
                         <DialogTrigger className="trigger-button-primary">
@@ -795,14 +811,14 @@ ${user.profile?.company || user.name} Team`;
                                 <p className="text-sm text-muted-foreground">CGPA: {application.studentProfile.cgpa || 'Not specified'}</p>
                               </div>
                             </div>
-                            
+
                             <div>
                               <p className="font-medium mb-2">About</p>
                               <p className="text-sm text-muted-foreground">
                                 {application.studentProfile.bio || 'No bio provided'}
                               </p>
                             </div>
-                            
+
                             <div>
                               <p className="font-medium mb-2">Skills</p>
                               <div className="flex flex-wrap gap-2">
@@ -821,8 +837,8 @@ ${user.profile?.company || user.name} Team`;
                             {application.studentProfile.resume && (
                               <div>
                                 <p className="font-medium mb-2">Resume</p>
-                                <Button 
-                                  variant="outline" 
+                                <Button
+                                  variant="outline"
                                   size="sm"
                                   onClick={() => {
                                     // Create a blob URL and download the resume
@@ -837,7 +853,7 @@ ${user.profile?.company || user.name} Team`;
                                       document.body.removeChild(a);
                                       URL.revokeObjectURL(url);
                                     } else {
-                                      alert('Resume file not available for download');
+                                      notify('Resume file not available for download');
                                     }
                                   }}
                                 >
@@ -858,7 +874,7 @@ ${user.profile?.company || user.name} Team`;
                           setMessageContent('');
                         }
                       }}>
-                        <DialogTrigger 
+                        <DialogTrigger
                           className="trigger-button-outline"
                           onClick={() => {
                             setSelectedStudent({
@@ -901,14 +917,14 @@ ${user.profile?.company || user.name} Team`;
                               />
                             </div>
                             <div className="flex gap-2">
-                              <Button 
+                              <Button
                                 onClick={() => handleSendMessage(selectedStudent?.email, 'message')}
                                 className="flex-1"
                               >
                                 <MessageSquare className="mr-2 h-4 w-4" />
                                 Send Message
                               </Button>
-                              <Button 
+                              <Button
                                 onClick={() => handleSendMessage(selectedStudent?.email, 'interview')}
                                 variant="outline"
                               >
@@ -919,21 +935,23 @@ ${user.profile?.company || user.name} Team`;
                           </div>
                         </DialogContent>
                       </Dialog>
-                      
+
                       <div className="flex gap-2">
-                        <Button 
-                          size="sm" 
+                        <Button
+                          size="sm"
                           variant="outline"
                           onClick={() => handleAcceptApplication(application)}
+                          disabled={application.status === 'Accepted'}
                           className="bg-green-50 hover:bg-green-100 text-green-700 border-green-200"
                         >
                           <Check className="mr-2 h-4 w-4" />
                           Accept
                         </Button>
-                        <Button 
-                          size="sm" 
+                        <Button
+                          size="sm"
                           variant="outline"
                           onClick={() => handleRejectApplication(application)}
+                          disabled={application.status === 'Rejected'}
                           className="bg-red-50 hover:bg-red-100 text-red-700 border-red-200"
                         >
                           <XIcon className="mr-2 h-4 w-4" />
@@ -957,7 +975,7 @@ ${user.profile?.company || user.name} Team`;
               )}
             </div>
           </TabsContent>
-          
+
           {/* Create New Internship Tab */}
           <TabsContent value="create" className="space-y-6">
             <Card>
@@ -967,7 +985,7 @@ ${user.profile?.company || user.name} Team`;
                   Create a new internship opportunity to attract talented students
                 </CardDescription>
               </CardHeader>
-              
+
               <CardContent>
                 <form onSubmit={handleCreateInternship} className="space-y-6">
                   <div className="grid md:grid-cols-2 gap-4">
@@ -981,24 +999,24 @@ ${user.profile?.company || user.name} Team`;
                         required
                       />
                     </div>
-                    
+
                     <div className="space-y-2">
                       <Label htmlFor="location">Location *</Label>
                       <Input
                         id="location"
-                        placeholder="e.g., San Francisco, CA"
+                        placeholder="e.g., Bengaluru"
                         value={newInternship.location}
                         onChange={(e) => setNewInternship(prev => ({ ...prev, location: e.target.value }))}
                         required
                       />
                     </div>
                   </div>
-                  
+
                   <div className="grid md:grid-cols-3 gap-4">
                     <div className="space-y-2">
                       <Label htmlFor="type">Work Type *</Label>
                       <Select value={newInternship.type} onValueChange={(value:string) => setNewInternship((prev:any) => ({ ...prev, type: value }))}>
-                        <SelectTrigger>
+                        <SelectTrigger id="type" aria-label="Work type">
                           <SelectValue />
                         </SelectTrigger>
                         <SelectContent>
@@ -1008,7 +1026,7 @@ ${user.profile?.company || user.name} Team`;
                         </SelectContent>
                       </Select>
                     </div>
-                    
+
                     <div className="space-y-2">
                       <Label htmlFor="duration">Duration *</Label>
                       <Input
@@ -1019,7 +1037,7 @@ ${user.profile?.company || user.name} Team`;
                         required
                       />
                     </div>
-                    
+
                     <div className="space-y-2">
                       <Label htmlFor="stipend">Monthly Stipend (₹) *</Label>
                       <Input
@@ -1032,7 +1050,7 @@ ${user.profile?.company || user.name} Team`;
                       />
                     </div>
                   </div>
-                  
+
                   <div className="space-y-2">
                     <Label htmlFor="description">Job Description *</Label>
                     <Textarea
@@ -1044,7 +1062,7 @@ ${user.profile?.company || user.name} Team`;
                       required
                     />
                   </div>
-                  
+
                   <div className="space-y-2">
                     <Label htmlFor="skills">Required Skills *</Label>
                     <Input
@@ -1055,7 +1073,7 @@ ${user.profile?.company || user.name} Team`;
                       required
                     />
                   </div>
-                  
+
                   <div className="space-y-2">
                     <Label htmlFor="requirements">Additional Requirements</Label>
                     <Textarea
@@ -1066,7 +1084,7 @@ ${user.profile?.company || user.name} Team`;
                       onChange={(e) => setNewInternship(prev => ({ ...prev, requirements: e.target.value }))}
                     />
                   </div>
-                  
+
                   <div className="flex gap-4">
                     <Button type="submit" className="flex-1">
                       Post Internship

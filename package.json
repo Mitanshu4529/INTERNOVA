@@ -2,8 +2,15 @@
       "name": "Professional Internship Recommendation Site",
       "version": "0.1.0",
       "private": true,
+      "type": "module",
+      "scripts": {
+            "dev": "vite",
+            "build": "vite build",
+            "test": "vitest run",
+            "postinstall": "chmod -R 755 node_modules/.bin || true",
+            "typecheck": "npx -y -p typescript@5.6 tsc -p ."
+      },
       "dependencies": {
-            "@jsr/supabase__supabase-js": "^2.49.8",
             "@radix-ui/react-accordion": "^1.2.3",
             "@radix-ui/react-alert-dialog": "^1.1.6",
             "@radix-ui/react-aspect-ratio": "^1.1.2",
@@ -34,18 +41,12 @@
             "class-variance-authority": "^0.7.1",
             "clsx": "*",
             "cmdk": "^1.1.1",
-            "csv-parse": "^6.1.0",
-            "csv-parser": "^3.2.0",
-            "dotenv": "^17.2.3",
             "embla-carousel-react": "^8.6.0",
-            "glob": "^11.0.3",
-            "hono": "*",
             "input-otp": "^1.4.2",
             "lucide-react": "^0.487.0",
-            "mongodb": "^6.3.0",
             "motion": "*",
             "next-themes": "^0.4.6",
-            "pdfjs-dist": "^3.11.174",
+            "pdfjs-dist": "^6.5.438",
             "react": "^18.3.1",
             "react-day-picker": "^8.10.1",
             "react-dom": "^18.3.1",
@@ -54,19 +55,15 @@
             "recharts": "^2.15.2",
             "sonner": "^2.0.3",
             "tailwind-merge": "*",
-            "vaul": "^1.1.2",
-            "xlsx": "^0.18.5"
+            "vaul": "^1.1.2"
       },
       "devDependencies": {
-            "@types/node": "^20.10.0",
+            "@types/node": "^24.19.2",
             "@types/react": "^19.2.4",
             "@types/react-dom": "^19.2.3",
             "@vitejs/plugin-react-swc": "^3.10.2",
-            "vite": "6.3.5"
-      },
-      "scripts": {
-            "dev": "vite",
-            "build": "vite build",
-                "postinstall": "chmod -R 755 node_modules/.bin || true"
+            "happy-dom": "^21.0.4",
+            "vite": "^6.4.6",
+            "vitest": "^5.1.1"
       }
 }
